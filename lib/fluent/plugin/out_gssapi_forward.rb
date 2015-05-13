@@ -17,6 +17,7 @@ module Fluent
     def initialize
       super
 
+      require 'base64'
       require 'gssapi'
       require 'fluent/plugin/socket_util'
     end
@@ -33,39 +34,116 @@ module Fluent
         port = e['port']
         port = port ? port.to_i : DEFAULT_LISTEN_PORT
 
-        weight = e['weight']
-        weight = weight ? weight.to_i : 60
+        service = e['service']
+        name = e['name'] || "#{host}:#{port}"
+        keytab = e['keytab']
 
-        name = e['name'] or "#{host}:#{port}"
-
-        log.info "New forwarding server configured '#{name}'", :name => name
-        NodeConfig :name => name, :host => host, :port => port, :weight => weight
+        log.info "GSSAPI forwarding server configured '#{name}'", :host => host, :port => port, :service => service
+        ServerConfig.new host, port, service, keytab, log
       end
     end
 
-    def start
-      super
+    # def start
+    #   super
 
-      @loop = Coolio::Loop.new
-      @thread = Thread.new(&method(:run))
-    end
+    #   @loop = Coolio::Loop.new
+    #   @nodes.each {|n| @loop.attach n.sock }
+    #   @thread = Thread.new(&method(:run))
+    # end
 
-    def shutdown
-      @loop.watchers.each {|w| w.detach }
-      @loop.stop
-      @thread.join
-    end
+    # def shutdown
+    #   super
+    #   @loop.watchers.each {|w| w.detach }
+    #   @loop.stop
+    #   @thread.join
+    # end
 
-    def run
-      @loop.run
+    # def run
+    #   @loop.run
+    # rescue => e
+    #   log.error "unexpected error", :error => e, :error_class => e.class
+    #   log.error_backtrace
+    # end
+
+    def write_objects(tag, chunk)
+      log.info "writing", :tag => tag, :chunk => chunk
+      return if chunk.empty?
+
+      @nodes.each do |node|
+        log.info "sending to #{node}"
+        node.write tag, chunk
+      end
+
     rescue => e
-      log.error "unexpected error", :error => e, :error_class => e.class
+      log.error "couldn't send", :error => e, :error_class => e.class
       log.error_backtrace
     end
 
   private
 
-    NodeConfig = Struct.new("NodeConfig", :name, :host, :port, :weight)
+    class ServerConfig
+
+      attr_reader :port
+
+      def initialize host, port, service, keytab, log
+        @host = host
+        @port = port
+        @service = service
+	@log = log
+        @keytab = keytab
+      end
+
+      def write tag, chunk
+        c = chunk.read rescue chunk
+
+        msg = gssapi.wrap_message [0, tag, c].to_msgpack
+        sock.write [ msg.length ].pack("N")
+        sock.write msg
+
+      rescue GSSAPI::GssApiError => e
+        @log.warn "GSSAPI failure: #{e.message}"
+        sock.close
+        raise
+      end
+
+      def sock
+        return @sock unless @sock.nil?
+
+        @sock = TCPSocket.new resolved, port
+
+        # opt = [1, @sender.send_timeout.to_i].pack('I!I!')  # { int l_onoff; int l_linger; }
+        # s.setsockopt(Socket::SOL_SOCKET, Socket::SO_LINGER, opt)
+
+        # opt = [@sender.send_timeout.to_i, 0].pack('L!L!')  # struct timeval
+        # s.setsockopt(Socket::SOL_SOCKET, Socket::SO_SNDTIMEO, opt)
+        @sock
+      end
+
+      def gssapi
+        return @gssapi unless @gssapi.nil?
+
+        @gssapi = GSSAPI::Simple.new @host, @service, @keytab
+        tok = @gssapi.init_context
+
+        sock.write [ tok.length ].pack('N')
+        sock.write tok
+
+        data = sock.gets.chomp
+
+        ctx = @gssapi.init_context Base64.strict_decode64(data)
+        raise "Couldn't establish GSS Connection" unless ctx
+
+        @log.warn "GSSAPI Handshake complete"
+
+        @gssapi
+      end
+
+      def resolved
+        sockaddr = Socket.pack_sockaddr_in @port, @host
+        _, resolved_host = Socket.unpack_sockaddr_in sockaddr
+        resolved_host
+      end
+    end
 
   end
 end
