@@ -97,7 +97,7 @@ module Fluent
         c = chunk.read rescue chunk
 
         msg = gssapi.wrap_message [0, tag, c].to_msgpack
-        sock.write [ msg.length ].pack("N")
+        sock.write [ 0xc6, msg.length ].pack("NN")
         sock.write msg
 
       rescue GSSAPI::GssApiError => e
@@ -125,7 +125,7 @@ module Fluent
         @gssapi = GSSAPI::Simple.new @host, @service, @keytab
         tok = @gssapi.init_context
 
-        sock.write [ tok.length ].pack('N')
+        sock.write [ 0xc6, tok.length ].pack('NN')
         sock.write tok
 
         data = sock.gets.chomp
