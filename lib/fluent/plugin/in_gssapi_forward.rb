@@ -74,11 +74,13 @@ module Fluent
     end
 
     #
-    # A very simple protocol. Each message consists of a 32 bit number
-    # representing the number of preceeding bytes. These may not come in on
-    # network boundaries and so we buffer incoming data until this condition is met.
-    # NOTE: I was going to just use msgpack for this however it doesn't support
-    # sending binary data, see https://github.com/msgpack/msgpack-ruby/issues/44
+    # Buffer is a workaround for ruby msgpack not correctly supporting binary
+    # data. For now we require that every message we get from the client is in
+    # bin32 mspack format. When the issue is fixed and released we can remove
+    # this in favour of just using msgpack.
+    #
+    # https://github.com/msgpack/msgpack-ruby/issues/44
+    # https://github.com/fluent/fluentd/pull/610
     #
     class Buffer
 
@@ -91,15 +93,17 @@ module Fluent
       end
 
       def next_value
-        # the references to 4 in this function are because the length of the
-        # initial integer is 4 bytes.
-        return nil if @buffer.length < 4
+        # the references to 8 in this function are because the length of the
+        # initial type and integer fields equal 8 bytes.
+        return nil if @buffer.length < 8
 
-        required = @buffer.unpack("N")[0]
-        return nil if @buffer.length < required + 4
+        bin32, required = @buffer.unpack("NN")
 
-        val = @buffer.byteslice(4, required)
-        @buffer = @buffer.byteslice((required + 4)..-1)
+        raise "Invalid message" unless bin32 == 0xc6
+        return nil if @buffer.length < required + 8
+
+        val = @buffer.byteslice(8, required)
+        @buffer = @buffer.byteslice((required + 8)..-1)
 
         val
       end
